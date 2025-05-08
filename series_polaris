@@ -1,0 +1,136 @@
+import polars as pl
+import plotly.graph_objects as go
+import plotly.io as pio
+
+# Load data with error handling
+try:
+    df = pl.read_csv("generated_file_data.csv", try_parse_dates=True)
+except Exception as e:
+    print(f"Error loading CSV file: {e}")
+    exit(1)
+
+print("Read complete")
+# Extract manufacturing unit from Filepath
+# (Polars regex group index starts at 1)
+df = df.with_columns([
+    pl.col("Filepath").str.extract(r"ARCHIEVE/([^/]+)", 1).alias("ManufacturingUnit"),
+    pl.col("Bytes").cast(pl.Float64).fill_null(0)
+])
+print("Extracted manufacturing unit")
+# Create time buckets
+# Polars can parse and manipulate datetimes efficiently
+if df["Timestamp"].dtype != pl.Datetime:
+    df = df.with_columns([
+        pl.col("Timestamp").str.replace("Z$", "", literal=True).str.strptime(pl.Datetime, fmt=None, strict=False)
+    ])
+df = df.with_columns([
+    pl.col("Timestamp").dt.truncate("1h").alias("hour"),
+    pl.col("Timestamp").dt.date().alias("day"),
+    pl.col("Timestamp").dt.strftime("%Y-%m").alias("month"),
+    pl.col("Timestamp").dt.strftime("%Y").alias("year"),
+])
+
+units = df["ManufacturingUnit"].drop_nulls().unique().to_list()
+buckets = ['hour', 'day', 'month', 'year']
+
+traces = []
+buttons = []
+
+# Per-unit traces
+for unit in units:
+    for bucket in buckets:
+        filtered = df.filter(pl.col("ManufacturingUnit") == unit)
+        grouped = filtered.group_by(bucket).agg(pl.col("Bytes").sum()).sort(bucket)
+        x_vals = grouped[bucket].to_list()
+        y_vals = grouped["Bytes"].to_list()
+        trace = go.Scatter(
+            x=x_vals,
+            y=y_vals,
+            mode='lines+markers',
+            name=f"{unit} - {bucket}",
+            visible=False
+        )
+        traces.append(trace)
+
+# ALL DATA traces
+grouped_all_day = df.group_by("day").agg(pl.col("Bytes").sum()).sort("day")
+trace_all_day = go.Scatter(
+    x=grouped_all_day["day"].to_list(),
+    y=grouped_all_day["Bytes"].to_list(),
+    mode='lines+markers',
+    name='ALL - day',
+    visible=False
+)
+traces.append(trace_all_day)
+
+grouped_all_month = df.group_by("month").agg(pl.col("Bytes").sum()).sort("month")
+trace_all_month = go.Scatter(
+    x=grouped_all_month["month"].to_list(),
+    y=grouped_all_month["Bytes"].to_list(),
+    mode='lines+markers',
+    name='ALL - month',
+    visible=False
+)
+traces.append(trace_all_month)
+
+grouped_all_year = df.group_by("year").agg(pl.col("Bytes").sum()).sort("year")
+trace_all_year = go.Scatter(
+    x=grouped_all_year["year"].to_list(),
+    y=grouped_all_year["Bytes"].to_list(),
+    mode='lines+markers',
+    name='ALL - year',
+    visible=False
+)
+traces.append(trace_all_year)
+
+# Buttons
+for idx, trace in enumerate(traces):
+    visible_flags = [False] * len(traces)
+    visible_flags[idx] = True
+    buttons.append(dict(
+        label=traces[idx].name,
+        method="update",
+        args=[{"visible": visible_flags},
+              {"title": traces[idx].name}]
+    ))
+
+# Move ALL buttons to the top
+all_buttons = [buttons[-3], buttons[-2], buttons[-1]]
+unit_buttons = buttons[:-3]
+buttons = all_buttons + unit_buttons
+
+# Set the first trace (ALL - day) to visible by default
+traces[-3].visible = True
+
+fig = go.Figure(data=traces)
+fig.update_layout(
+    title="Bytes Over Time",
+    xaxis_title="Time",
+    yaxis_title="Bytes",
+    updatemenus=[dict(
+        active=0,
+        buttons=buttons,
+        direction="down",
+        showactive=True,
+        x=0.1,
+        xanchor="left",
+        y=1.1,
+        yanchor="top"
+    )],
+    height=600,
+    width=1000,
+    margin=dict(t=100)
+)
+
+# Export the Plotly figure as a div
+plot_div = pio.to_html(fig, full_html=False, include_plotlyjs='cdn')
+
+# Insert the div into your template
+with open('my_template.html', 'r') as f:
+    template = f.read()
+
+final_html = template.replace('<!-- PLOTLY_GRAPH -->', plot_div)
+
+# Write the final HTML to a file
+with open('final_dashboard_polars.html', 'w') as f:
+    f.write(final_html) 
